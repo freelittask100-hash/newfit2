@@ -24,8 +24,15 @@ interface PaymentPayload {
 }
 
 serve(async (req) => {
+  console.log('[PhonePe Initiate] Incoming request:', {
+    method: req.method,
+    url: req.url,
+    headers: Object.fromEntries(req.headers)
+  });
+
   // Enable CORS for all requests
   if (req.method === 'OPTIONS') {
+    console.log('[PhonePe Initiate] OPTIONS preflight request received');
     return new Response(null, {
       status: 200,
       headers: {
