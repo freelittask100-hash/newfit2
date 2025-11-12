@@ -92,14 +92,16 @@ const Checkout = () => {
       quantity: item.quantity,
     }));
 
+    // Create order params - database function expects user_id as first parameter
+    // For guest checkout, we need to use a guest user or create one first
     let orderParams: any;
+    let finalUserId = user?.id;
 
     if (isGuestCheckout) {
-      // Create guest order
+      // For guest checkout, create or use guest user
+      // Store guest details in order notes for admin
       orderParams = {
-        p_customer_name: guestData.name,
-        p_customer_email: guestData.email,
-        p_customer_phone: guestData.phone,
+        p_user_id: finalUserId || '00000000-0000-0000-0000-000000000000', // UUID placeholder for guest
         p_total_price: discountedTotal,
         p_address: guestData.address,
         p_payment_id: null, // Will be updated after payment
@@ -191,7 +193,8 @@ const Checkout = () => {
     if (paymentResponse.success && paymentResponse.data?.instrumentResponse?.redirectInfo?.url) {
       // Store payment details
       await storePaymentDetails(orderId, {
-        merchantTransactionId,
+        order_id: orderId,
+        merchant_transaction_id: merchantTransactionId,
         amount: paymentOptions.amount,
         status: 'INITIATED'
       });
@@ -260,8 +263,9 @@ const Checkout = () => {
 
               <Card className="p-6 mb-4">
                 <AddressForm
-                  onAddressSubmit={(address) => setGuestData({ ...guestData, address })}
+                  onAddressSubmit={(address, phone) => setGuestData({ ...guestData, address, phone: phone || guestData.phone })}
                   initialAddress={guestData.address}
+                  initialPhone={guestData.phone}
                 />
               </Card>
             </>
@@ -270,15 +274,16 @@ const Checkout = () => {
               <Card className="p-6 mb-4">
                 <h2 className="text-xl font-bold mb-4">Delivery Address</h2>
                 <AddressForm
-                  onAddressSubmit={(address) => {
-                    // Update profile address in database
+                  onAddressSubmit={(address, phone) => {
+                    // Update profile address and phone in database
                     supabase
                       .from("profiles" as any)
-                      .update({ address })
+                      .update({ address, phone })
                       .eq("id", user.id);
-                    setProfile({ ...profile, address });
+                    setProfile({ ...profile, address, phone });
                   }}
                   initialAddress={profile?.address}
+                  initialPhone={profile?.phone}
                 />
               </Card>
             </>

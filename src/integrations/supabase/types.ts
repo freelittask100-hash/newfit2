@@ -96,6 +96,59 @@ export interface Database {
         }
         Relationships: []
       }
+      payment_transactions: {
+        Row: {
+          id: string
+          order_id: string
+          merchant_transaction_id: string
+          amount: number
+          status: 'INITIATED' | 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED' | 'CANCELLED'
+          phonepe_transaction_id: string | null
+          payment_method: string | null
+          response_code: string | null
+          response_message: string | null
+          phonepe_response: Json | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          order_id: string
+          merchant_transaction_id: string
+          amount: number
+          status?: 'INITIATED' | 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED' | 'CANCELLED'
+          phonepe_transaction_id?: string | null
+          payment_method?: string | null
+          response_code?: string | null
+          response_message?: string | null
+          phonepe_response?: Json | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          order_id?: string
+          merchant_transaction_id?: string
+          amount?: number
+          status?: 'INITIATED' | 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED' | 'CANCELLED'
+          phonepe_transaction_id?: string | null
+          payment_method?: string | null
+          response_code?: string | null
+          response_message?: string | null
+          phonepe_response?: Json | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payment_transactions_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       product_ratings: {
         Row: {
           id: string

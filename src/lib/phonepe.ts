@@ -1,19 +1,21 @@
+/**
+ * PhonePe Payment Gateway Integration - Production
+ * Secure payment processing with comprehensive validation and error handling
+ */
+
 import { supabase } from '@/integrations/supabase/client';
-import SHA256 from 'crypto-js/sha256';
+import CryptoJS from 'crypto-js';
 
-// PhonePe API configuration
-const PHONEPE_ENV = import.meta.env.VITE_PHONEPE_ENV || 'sandbox';
-const PHONEPE_BASE_URL = PHONEPE_ENV === 'production'
-  ? 'https://api.phonepe.com/apis/hermes'
-  : 'https://api-preprod.phonepe.com/apis/pg-sandbox';
-
+// PhonePe API Configuration for Production
 const PHONEPE_MERCHANT_ID = import.meta.env.VITE_PHONEPE_MERCHANT_ID || '';
-const PHONEPE_SALT_KEY = import.meta.env.VITE_PHONEPE_SALT_KEY || '';
-const PHONEPE_SALT_INDEX = import.meta.env.VITE_PHONEPE_SALT_INDEX || '1';
+const PHONEPE_CLIENT_ID = import.meta.env.VITE_PHONEPE_CLIENT_ID || '';
+const PHONEPE_CLIENT_SECRET = import.meta.env.VITE_PHONEPE_CLIENT_SECRET || '';
+const PHONEPE_API_URL = import.meta.env.VITE_PHONEPE_API_URL || 'https://api.phonepe.com/apis/pg';
+const PHONEPE_CALLBACK_URL = import.meta.env.VITE_PHONEPE_CALLBACK_URL || '';
 
 // Validate configuration
-if (!PHONEPE_MERCHANT_ID || !PHONEPE_SALT_KEY) {
-  console.warn('⚠️ PhonePe credentials not configured. Please set VITE_PHONEPE_MERCHANT_ID and VITE_PHONEPE_SALT_KEY in .env file');
+if (!PHONEPE_MERCHANT_ID || !PHONEPE_CLIENT_ID || !PHONEPE_CLIENT_SECRET) {
+  console.warn('⚠️ PhonePe credentials not fully configured');
 }
 
 export interface PhonePePaymentOptions {
@@ -58,7 +60,7 @@ export interface PhonePeStatusResponse {
     responseCode: string;
     paymentInstrument?: {
       type: string;
-      [key: string]: any;
+      [key: string]: string | number | boolean;
     };
   };
 }
@@ -73,119 +75,70 @@ export interface PaymentTransaction {
   payment_method?: string;
   response_code?: string;
   response_message?: string;
-  phonepe_response?: any;
+  phonepe_response?: Record<string, unknown>;
 }
 
-// Generate SHA256 hash for PhonePe
-function generateSHA256Hash(data: string): string {
-  return SHA256(data).toString();
-}
+// Note: Payload creation and auth headers now handled by Edge Function
 
-// Create PhonePe payment payload
-function createPaymentPayload(options: PhonePePaymentOptions) {
-  const payload = {
-    merchantId: PHONEPE_MERCHANT_ID,
-    merchantTransactionId: options.merchantTransactionId,
-    merchantUserId: options.merchantUserId,
-    amount: options.amount,
-    redirectUrl: options.redirectUrl,
-    redirectMode: 'REDIRECT',
-    callbackUrl: options.callbackUrl,
-    mobileNumber: options.mobileNumber,
-    paymentInstrument: {
-      type: 'PAY_PAGE'
-    },
-    deviceContext: options.deviceContext
-  };
-
-  return payload;
-}
-
-// Create SHA256 hash for request
-function createRequestHash(payload: string, endpoint: string): string {
-  const data = payload + endpoint + PHONEPE_SALT_KEY;
-  return generateSHA256Hash(data) + '###' + PHONEPE_SALT_INDEX;
-}
-
-// Initiate PhonePe payment with retry logic
+// Initiate PhonePe payment via Edge Function to avoid CORS issues
 export async function initiatePhonePePayment(
   options: PhonePePaymentOptions,
   retries: number = 2
 ): Promise<PhonePeOrderResponse> {
-  // Validate credentials
-  if (!PHONEPE_MERCHANT_ID || !PHONEPE_SALT_KEY) {
-    return {
-      success: false,
-      code: 'CONFIG_ERROR',
-      message: 'PhonePe credentials not configured. Please check your environment variables.'
-    };
-  }
-
-  let lastError: any;
+  let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const payload = createPaymentPayload(options);
-      const payloadString = JSON.stringify(payload);
-      const base64Payload = btoa(payloadString);
-
-      const requestHash = createRequestHash(base64Payload, '/pg/v1/pay');
-
-      const requestBody = {
-        request: base64Payload
-      };
-
-      console.log(`[PhonePe] Initiating payment (attempt ${attempt + 1}/${retries + 1})`, {
+      console.log(`[PhonePe] Initiating payment via Edge Function (attempt ${attempt + 1}/${retries + 1})`, {
         merchantTransactionId: options.merchantTransactionId,
-        amount: options.amount,
-        environment: PHONEPE_ENV
+        amount: options.amount
       });
 
-      const response = await fetch(`${PHONEPE_BASE_URL}/pg/v1/pay`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-VERIFY': requestHash,
-          'X-MERCHANT-ID': PHONEPE_MERCHANT_ID
-        },
-        body: JSON.stringify(requestBody)
+      // Call Supabase Edge Function instead of direct API call
+      const { data, error } = await supabase.functions.invoke('phonepe-initiate', {
+        body: {
+          merchantTransactionId: options.merchantTransactionId,
+          amount: options.amount,
+          mobileNumber: options.mobileNumber || '',
+          callbackUrl: options.callbackUrl,
+          merchantUserId: options.merchantUserId,
+          redirectUrl: options.redirectUrl
+        }
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      if (error) {
+        throw new Error(`Edge Function error: ${error.message}`);
       }
 
-      const result = await response.json();
-
       console.log('[PhonePe] Payment initiation response:', {
-        success: result.success,
-        code: result.code,
-        message: result.message
+        success: data?.success,
+        code: data?.code,
+        message: data?.message
       });
 
-      if (result.success) {
+      if (data?.success) {
         return {
           success: true,
-          code: result.code,
-          message: result.message,
-          data: result.data
+          code: data.code || 'SUCCESS',
+          message: data.message || 'Payment initiated successfully',
+          data: data.data
         };
       } else {
         // Don't retry for certain error codes
-        const noRetryErrors = ['BAD_REQUEST', 'INVALID_MERCHANT', 'DUPLICATE_TRANSACTION'];
-        if (noRetryErrors.includes(result.code)) {
+        const noRetryErrors = ['BAD_REQUEST', 'INVALID_MERCHANT', 'DUPLICATE_TRANSACTION', 'INVALID_REQUEST'];
+        if (data?.code && noRetryErrors.includes(data.code)) {
           return {
             success: false,
-            code: result.code,
-            message: result.message || 'Payment initiation failed'
+            code: data.code,
+            message: data.message || 'Payment initiation failed'
           };
         }
 
-        lastError = new Error(result.message || 'Payment initiation failed');
+        lastError = new Error(data?.message || 'Payment initiation failed');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[PhonePe] Payment initiation attempt ${attempt + 1} failed:`, error);
-      lastError = error;
+      lastError = error instanceof Error ? error : new Error(String(error));
 
       // Wait before retry (exponential backoff)
       if (attempt < retries) {
@@ -201,52 +154,42 @@ export async function initiatePhonePePayment(
   };
 }
 
-// Check payment status with retry logic
+// Check payment status via Edge Function to avoid CORS issues
 export async function checkPaymentStatus(
   merchantTransactionId: string,
   retries: number = 3
 ): Promise<PhonePeStatusResponse | null> {
-  if (!PHONEPE_MERCHANT_ID || !PHONEPE_SALT_KEY) {
-    console.error('[PhonePe] Credentials not configured');
-    return null;
-  }
-
-  let lastError: any;
+  let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const endpoint = `/pg/v1/status/${PHONEPE_MERCHANT_ID}/${merchantTransactionId}`;
-      const requestHash = createRequestHash('', endpoint);
-
-      console.log(`[PhonePe] Checking payment status (attempt ${attempt + 1}/${retries + 1})`, {
+      console.log(`[PhonePe] Checking payment status via Edge Function (attempt ${attempt + 1}/${retries + 1})`, {
         merchantTransactionId
       });
 
-      const response = await fetch(`${PHONEPE_BASE_URL}${endpoint}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-VERIFY': requestHash,
-          'X-MERCHANT-ID': PHONEPE_MERCHANT_ID
-        }
+      // Call Supabase Edge Function instead of direct API call
+      const { data, error } = await supabase.functions.invoke('phonepe-check-status', {
+        body: { merchantTransactionId }
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      if (error) {
+        throw new Error(`Edge Function error: ${error.message}`);
       }
 
-      const result = await response.json();
-
       console.log('[PhonePe] Payment status response:', {
-        success: result.success,
-        code: result.code,
-        state: result.data?.state
+        success: data?.success,
+        code: data?.code,
+        state: data?.data?.state
       });
 
-      return result;
-    } catch (error: any) {
+      if (data?.data) {
+        return data.data as PhonePeStatusResponse;
+      }
+
+      lastError = new Error(data?.message || 'Payment status check failed');
+    } catch (error: unknown) {
       console.error(`[PhonePe] Status check attempt ${attempt + 1} failed:`, error);
-      lastError = error;
+      lastError = error instanceof Error ? error : new Error(String(error));
 
       // Wait before retry
       if (attempt < retries) {
@@ -264,10 +207,12 @@ export async function createPaymentTransaction(
   orderId: string,
   merchantTransactionId: string,
   amount: number,
-  metadata?: any
+  metadata?: Record<string, unknown>
 ): Promise<string | null> {
   try {
-    const { data, error } = await (supabase.rpc as any)('create_payment_transaction', {
+    const { data, error } = await (supabase.rpc as unknown as {
+      (name: string, params: Record<string, unknown>): Promise<{ data: string; error: unknown }>;
+    })('create_payment_transaction', {
       p_order_id: orderId,
       p_merchant_transaction_id: merchantTransactionId,
       p_amount: amount,
@@ -291,7 +236,7 @@ export async function createPaymentTransaction(
 export async function updatePaymentTransaction(
   merchantTransactionId: string,
   status: 'INITIATED' | 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED' | 'CANCELLED',
-  phonePeResponse?: any
+  phonePeResponse?: PhonePeStatusResponse
 ): Promise<boolean> {
   try {
     const paymentMethod = phonePeResponse?.data?.paymentInstrument?.type;
@@ -299,7 +244,9 @@ export async function updatePaymentTransaction(
     const responseCode = phonePeResponse?.data?.responseCode;
     const responseMessage = phonePeResponse?.message;
 
-    const { data, error } = await (supabase.rpc as any)('update_payment_transaction_status', {
+    const { data, error } = await (supabase.rpc as unknown as {
+      (name: string, params: Record<string, unknown>): Promise<{ data: boolean; error: unknown }>;
+    })('update_payment_transaction_status', {
       p_merchant_transaction_id: merchantTransactionId,
       p_status: status,
       p_phonepe_transaction_id: phonepeTransactionId || null,
@@ -328,13 +275,12 @@ export async function updatePaymentTransaction(
 }
 
 // Store payment details (legacy function for backward compatibility)
-export async function storePaymentDetails(orderId: string, paymentData: any) {
+export async function storePaymentDetails(orderId: string, paymentData: PaymentTransaction): Promise<void> {
   try {
-    // Update the order with payment information
     const { error } = await supabase
       .from('orders')
       .update({
-        payment_id: paymentData.merchantTransactionId,
+        payment_id: paymentData.merchant_transaction_id,
         status: paymentData.status === 'SUCCESS' ? 'paid' : 'pending'
       })
       .eq('id', orderId);
@@ -352,8 +298,8 @@ export async function storePaymentDetails(orderId: string, paymentData: any) {
 // Get payment transaction by merchant transaction ID
 export async function getPaymentTransaction(merchantTransactionId: string): Promise<PaymentTransaction | null> {
   try {
-    const { data, error } = await (supabase
-      .from as any)('payment_transactions')
+    const { data, error } = await supabase
+      .from('payment_transactions')
       .select('*')
       .eq('merchant_transaction_id', merchantTransactionId)
       .single();
@@ -363,7 +309,7 @@ export async function getPaymentTransaction(merchantTransactionId: string): Prom
       return null;
     }
 
-    return data as PaymentTransaction;
+    return data as unknown as PaymentTransaction;
   } catch (error) {
     console.error('[PhonePe] Error getting payment transaction:', error);
     return null;
@@ -373,8 +319,8 @@ export async function getPaymentTransaction(merchantTransactionId: string): Prom
 // Get payment transactions for an order
 export async function getOrderPaymentTransactions(orderId: string): Promise<PaymentTransaction[]> {
   try {
-    const { data, error } = await (supabase
-      .from as any)('payment_transactions')
+    const { data, error } = await supabase
+      .from('payment_transactions')
       .select('*')
       .eq('order_id', orderId)
       .order('created_at', { ascending: false });
@@ -384,7 +330,7 @@ export async function getOrderPaymentTransactions(orderId: string): Promise<Paym
       return [];
     }
 
-    return (data || []) as PaymentTransaction[];
+    return (data || []) as unknown as PaymentTransaction[];
   } catch (error) {
     console.error('[PhonePe] Error getting order payment transactions:', error);
     return [];
@@ -393,11 +339,12 @@ export async function getOrderPaymentTransactions(orderId: string): Promise<Paym
 
 // Verify PhonePe webhook signature
 export function verifyWebhookSignature(
-  base64Response: string,
+  requestBody: string,
   receivedSignature: string
 ): boolean {
   try {
-    const expectedSignature = SHA256(base64Response + PHONEPE_SALT_KEY).toString() + '###' + PHONEPE_SALT_INDEX;
+    // Using the new production API method: hash the request body with client secret
+    const expectedSignature = CryptoJS.SHA256(requestBody + PHONEPE_CLIENT_SECRET).toString();
     return expectedSignature === receivedSignature;
   } catch (error) {
     console.error('[PhonePe] Error verifying webhook signature:', error);
